@@ -1,0 +1,11 @@
+flask>=3.0
+flask-cors
+openai>=1.0
+python-docx
+pdfplumber
+openpyxl
+olefile
+chardet
+requests
+python-dotenv
+gunicorn
