@@ -469,16 +469,34 @@ def make_minutes(transcript: str, meta_text: str) -> dict:
             {"role": "system", "content":
              "당신은 이노티움(주) 전문 회의록 작성자입니다.\n"
              "원문에 있는 내용만 포함하세요. 추측·없는 내용 추가 금지.\n"
-             "결정사항은 '~하기로 함' 형식. 격식체 사용."},
+             "결정사항은 '~하기로 함' 형식. 격식체 사용.\n"
+             "모든 배열 요소는 반드시 문자열(string)이어야 합니다. 객체(object) 사용 금지."},
             {"role": "user", "content":
              f"[회의 정보]\n{meta_text}\n\n[회의 내용]\n{transcript}\n\n"
-             '아래 JSON으로만 응답:\n{"title":"","overview":[],"discussion":[{"main":"","sub":[]}],"decisions":[],"others":[]}'},
+             "아래 JSON 스키마를 엄격히 따르세요. 모든 값은 문자열(string)입니다:\n"
+             '{"title": "문자열", "overview": ["문자열1", "문자열2"], '
+             '"discussion": [{"main": "문자열", "sub": ["문자열1", "문자열2"]}], '
+             '"decisions": ["문자열1 (~하기로 함)"], "others": ["문자열"]}'},
         ],
         response_format={"type": "json_object"},
         temperature=0.2,
         max_tokens=2000,
     )
-    return __import__("json").loads(resp.choices[0].message.content)
+    raw = __import__("json").loads(resp.choices[0].message.content)
+    # 혹시 dict가 섞여 들어온 경우 문자열로 변환
+    def _flatten(v):
+        if isinstance(v, str): return v
+        if isinstance(v, dict): return " ".join(str(x) for x in v.values())
+        return str(v)
+    raw["overview"]   = [_flatten(x) for x in raw.get("overview", [])]
+    raw["decisions"]  = [_flatten(x) for x in raw.get("decisions", [])]
+    raw["others"]     = [_flatten(x) for x in raw.get("others", [])]
+    raw["discussion"] = [
+        {"main": _flatten(d.get("main", d) if isinstance(d, dict) else d),
+         "sub": [_flatten(s) for s in (d.get("sub", []) if isinstance(d, dict) else [])]}
+        for d in raw.get("discussion", [])
+    ]
+    return raw
 
 
 # ── 미리보기 / DOCX ─────────────────────────────────────────────────────────
