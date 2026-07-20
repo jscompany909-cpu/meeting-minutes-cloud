@@ -431,36 +431,57 @@ def transcribe(file_path: str) -> str:
         tmp_compressed = None
 
         if file_size > groq_limit:
-            log.info(f"파일 {file_size//1024//1024}MB → 압축 중 (32kbps 모노)...")
+            log.info(f"파일 {file_size//1024//1024}MB → 압축 시도 중...")
+            compressed_ok = False
+            tmp_compressed = file_path + "_compressed.mp3"
+
+            # 방법 1: imageio-ffmpeg (pip 내장 ffmpeg)
             try:
-                # imageio-ffmpeg: pip 패키지로 ffmpeg 내장 (시스템 설치 불필요)
-                import imageio_ffmpeg
-                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-
+                import imageio_ffmpeg as _iff
+                ffmpeg_exe = _iff.get_ffmpeg_exe()
                 import subprocess as _sp
-                tmp_compressed = file_path + "_compressed.mp3"
-                _sp.run([
+                ret = _sp.run([
                     ffmpeg_exe, "-y", "-i", file_path,
-                    "-ac", "1",          # 모노
-                    "-ar", "16000",      # 16kHz (음성 품질 충분)
-                    "-b:a", "32k",       # 32kbps
-                    "-vn",               # 영상 스트림 제거
+                    "-ac", "1", "-ar", "16000", "-b:a", "32k", "-vn",
                     tmp_compressed,
-                ], capture_output=True, timeout=120)
+                ], capture_output=True, timeout=180)
+                if ret.returncode == 0 and _os.path.exists(tmp_compressed) and _os.path.getsize(tmp_compressed) > 1000:
+                    compressed_size = _os.path.getsize(tmp_compressed)
+                    log.info(f"imageio-ffmpeg 압축: {file_size//1024//1024}MB → {compressed_size//1024//1024}MB")
+                    compressed_ok = True
+            except Exception as e1:
+                log.warning(f"imageio-ffmpeg 실패: {e1}")
 
+            # 방법 2: 시스템 ffmpeg (있을 경우)
+            if not compressed_ok:
+                try:
+                    import subprocess as _sp
+                    ret = _sp.run([
+                        "ffmpeg", "-y", "-i", file_path,
+                        "-ac", "1", "-ar", "16000", "-b:a", "32k", "-vn",
+                        tmp_compressed,
+                    ], capture_output=True, timeout=180)
+                    if ret.returncode == 0 and _os.path.exists(tmp_compressed) and _os.path.getsize(tmp_compressed) > 1000:
+                        compressed_size = _os.path.getsize(tmp_compressed)
+                        log.info(f"시스템 ffmpeg 압축: {file_size//1024//1024}MB → {compressed_size//1024//1024}MB")
+                        compressed_ok = True
+                except Exception as e2:
+                    log.warning(f"시스템 ffmpeg 실패: {e2}")
+
+            if compressed_ok:
                 compressed_size = _os.path.getsize(tmp_compressed)
-                log.info(f"압축 완료: {file_size//1024//1024}MB → {compressed_size//1024//1024}MB")
-
                 if compressed_size > groq_limit:
-                    # 그래도 크면 → 15분 단위 청크로 분할 후 순차 전사
                     log.info("압축 후에도 초과 → 청크 분할 전사")
                     return _transcribe_chunks(tmp_compressed, compressed_size)
-
                 send_path = tmp_compressed
                 fname = "audio_compressed.mp3"
-            except Exception as e:
-                log.warning(f"압축 실패 ({e}) → 원본 직접 시도")
-                # 압축 실패 시 원본으로 시도 (Groq이 거부할 수 있음)
+            else:
+                # 압축 불가 → 파일 크기 초과 안내
+                mb = file_size // 1024 // 1024
+                raise ValueError(
+                    f"파일({mb}MB)이 너무 큽니다. 서버에서 압축을 시도했으나 실패했습니다.\n"
+                    f"100MB 이하 파일을 업로드하거나, 음성 품질을 낮춰 저장 후 재시도해주세요."
+                )
 
         gc = Groq(api_key=GROQ_API_KEY)
         try:
@@ -766,7 +787,7 @@ def index():
 def health():
     engine, label = _stt_engine()
     return __import__("json").dumps(
-        {"ok": True, "server": "meeting-minutes-cloud", "version": "3.0",
+        {"ok": True, "server": "meeting-minutes-cloud", "version": "3.1",
          "stt": label or "unavailable", "gpt4o": bool(AZURE_KEY)},
         ensure_ascii=False
     ), 200, {"Content-Type": "application/json; charset=utf-8"}
