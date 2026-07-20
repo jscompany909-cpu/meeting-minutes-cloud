@@ -2,7 +2,6 @@ flask>=3.0
 flask-cors
 openai>=1.0
 groq
-imageio-ffmpeg
 python-docx
 pdfplumber
 openpyxl

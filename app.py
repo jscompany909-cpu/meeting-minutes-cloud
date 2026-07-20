@@ -435,38 +435,25 @@ def transcribe(file_path: str) -> str:
             compressed_ok = False
             tmp_compressed = file_path + "_compressed.mp3"
 
-            # 방법 1: imageio-ffmpeg (pip 내장 ffmpeg)
+            # 시스템 ffmpeg로 압축 (apt-get으로 설치됨)
             try:
-                import imageio_ffmpeg as _iff
-                ffmpeg_exe = _iff.get_ffmpeg_exe()
                 import subprocess as _sp
                 ret = _sp.run([
-                    ffmpeg_exe, "-y", "-i", file_path,
-                    "-ac", "1", "-ar", "16000", "-b:a", "32k", "-vn",
+                    "ffmpeg", "-y", "-i", file_path,
+                    "-ac", "1",      # 모노
+                    "-ar", "16000",  # 16kHz
+                    "-b:a", "32k",   # 32kbps
+                    "-vn",           # 영상 제거
                     tmp_compressed,
                 ], capture_output=True, timeout=180)
                 if ret.returncode == 0 and _os.path.exists(tmp_compressed) and _os.path.getsize(tmp_compressed) > 1000:
                     compressed_size = _os.path.getsize(tmp_compressed)
-                    log.info(f"imageio-ffmpeg 압축: {file_size//1024//1024}MB → {compressed_size//1024//1024}MB")
+                    log.info(f"ffmpeg 압축 완료: {file_size//1024//1024}MB → {compressed_size//1024//1024}MB")
                     compressed_ok = True
+                else:
+                    log.warning(f"ffmpeg 압축 실패: returncode={ret.returncode}")
             except Exception as e1:
-                log.warning(f"imageio-ffmpeg 실패: {e1}")
-
-            # 방법 2: 시스템 ffmpeg (있을 경우)
-            if not compressed_ok:
-                try:
-                    import subprocess as _sp
-                    ret = _sp.run([
-                        "ffmpeg", "-y", "-i", file_path,
-                        "-ac", "1", "-ar", "16000", "-b:a", "32k", "-vn",
-                        tmp_compressed,
-                    ], capture_output=True, timeout=180)
-                    if ret.returncode == 0 and _os.path.exists(tmp_compressed) and _os.path.getsize(tmp_compressed) > 1000:
-                        compressed_size = _os.path.getsize(tmp_compressed)
-                        log.info(f"시스템 ffmpeg 압축: {file_size//1024//1024}MB → {compressed_size//1024//1024}MB")
-                        compressed_ok = True
-                except Exception as e2:
-                    log.warning(f"시스템 ffmpeg 실패: {e2}")
+                log.warning(f"ffmpeg 압축 오류: {e1}")
 
             if compressed_ok:
                 compressed_size = _os.path.getsize(tmp_compressed)
@@ -502,9 +489,9 @@ def transcribe(file_path: str) -> str:
 
 def _transcribe_chunks(audio_path: str, total_size: int) -> str:
     """큰 파일을 15분씩 나눠 Groq으로 전사 후 합치기"""
-    import imageio_ffmpeg, subprocess as _sp, os as _os, tempfile as _tmp
+    import subprocess as _sp, os as _os
 
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_exe = "ffmpeg"
     groq_client = Groq(api_key=GROQ_API_KEY)
     chunk_sec   = 15 * 60  # 15분
     texts       = []
@@ -787,7 +774,7 @@ def index():
 def health():
     engine, label = _stt_engine()
     return __import__("json").dumps(
-        {"ok": True, "server": "meeting-minutes-cloud", "version": "3.1",
+        {"ok": True, "server": "meeting-minutes-cloud", "version": "3.2",
          "stt": label or "unavailable", "gpt4o": bool(AZURE_KEY)},
         ensure_ascii=False
     ), 200, {"Content-Type": "application/json; charset=utf-8"}
