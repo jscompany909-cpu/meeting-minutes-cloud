@@ -1,6 +1,7 @@
 flask>=3.0
 flask-cors
 openai>=1.0
+groq
 python-docx
 pdfplumber
 openpyxl

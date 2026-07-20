@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 이노티움 회의록 자동 생성 — 클라우드 버전
-- 로컬 PC 불필요
+- 로컬 PC 불필요, 어디서나 사용 가능
+- 음성 파일 → Groq Whisper (무료) → GPT-4o → 회의록 DOCX
 - 텍스트 / 문서 파일 → GPT-4o → 회의록 DOCX
-- 음성 파일 → Azure Whisper / OpenAI Whisper → GPT-4o → 회의록 DOCX
 - 레드마인 저장은 선택 버튼 (사내망 연결 시만 작동)
 """
 
@@ -28,15 +28,19 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 UPLOAD_TMP = Path(tempfile.gettempdir()) / "meeting_cloud"
 UPLOAD_TMP.mkdir(exist_ok=True)
 
-# ── Azure OpenAI ──────────────────────────────────────────────────────────────
+# ── Azure OpenAI (GPT-4o — 회의록 생성용) ────────────────────────────────────
 AZURE_ENDPOINT   = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 AZURE_KEY        = os.environ.get("AZURE_OPENAI_KEY", "")
 AZURE_DEPLOY     = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 AZURE_API_VER    = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
-AZURE_WHISPER    = os.environ.get("AZURE_OPENAI_WHISPER_DEPLOYMENT", "")  # 선택
 
-# OpenAI 직접 API (Azure Whisper 없을 때 fallback)
+# ── Groq (Whisper 무료 STT) ───────────────────────────────────────────────────
+GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
+GROQ_WHISPER     = os.environ.get("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
+
+# ── fallback: OpenAI / Azure Whisper ─────────────────────────────────────────
 OPENAI_API_KEY   = os.environ.get("OPENAI_API_KEY", "")
+AZURE_WHISPER    = os.environ.get("AZURE_OPENAI_WHISPER_DEPLOYMENT", "")
 
 # 레드마인 (선택 — 사내망 전용)
 REDMINE_URL      = os.environ.get("REDMINE_URL", "")
@@ -395,48 +399,62 @@ function resetAll(){
 </html>"""
 
 
-# ── STT 상태 확인 ─────────────────────────────────────────────────────────────
+# ── STT 엔진 감지 ────────────────────────────────────────────────────────────
 def _stt_engine():
-    """사용 가능한 STT 엔진 반환"""
-    if AZURE_WHISPER and azure_client:
-        return "azure_whisper", f"Azure Whisper ({AZURE_WHISPER})"
+    """우선순위: Groq → OpenAI → Azure Whisper → 로컬 Whisper"""
+    if GROQ_API_KEY:
+        return "groq", f"Groq {GROQ_WHISPER} (무료)"
     if OPENAI_API_KEY:
-        return "openai_whisper", "OpenAI Whisper API"
-    # 로컬 faster-whisper 확인
+        return "openai", "OpenAI Whisper API"
+    if AZURE_WHISPER and azure_client:
+        return "azure", f"Azure Whisper ({AZURE_WHISPER})"
     try:
         from faster_whisper import WhisperModel
-        return "local_whisper", "로컬 Whisper (faster-whisper)"
+        return "local", "로컬 Whisper (faster-whisper)"
     except ImportError:
         return None, None
 
 
 # ── 음성 → 텍스트 ─────────────────────────────────────────────────────────────
 def transcribe(file_path: str) -> str:
-    engine, label = _stt_engine()
+    engine, _ = _stt_engine()
+    fname = Path(file_path).name
 
-    if engine == "azure_whisper":
+    if engine == "groq":
+        from groq import Groq
+        gc = Groq(api_key=GROQ_API_KEY)
+        with open(file_path, "rb") as f:
+            result = gc.audio.transcriptions.create(
+                file=(fname, f.read()),
+                model=GROQ_WHISPER,
+                language="ko",
+                response_format="text",
+            )
+        return result if isinstance(result, str) else result.text
+
+    elif engine == "openai":
+        from openai import OpenAI
+        oc = OpenAI(api_key=OPENAI_API_KEY)
+        with open(file_path, "rb") as f:
+            result = oc.audio.transcriptions.create(
+                model="whisper-1", file=f, language="ko")
+        return result.text
+
+    elif engine == "azure":
         with open(file_path, "rb") as f:
             result = azure_client.audio.transcriptions.create(
                 model=AZURE_WHISPER, file=f)
         return result.text
 
-    elif engine == "openai_whisper":
-        from openai import OpenAI
-        oc = OpenAI(api_key=OPENAI_API_KEY)
-        with open(file_path, "rb") as f:
-            result = oc.audio.transcriptions.create(model="whisper-1", file=f, language="ko")
-        return result.text
-
-    elif engine == "local_whisper":
+    elif engine == "local":
         from faster_whisper import WhisperModel
         model = WhisperModel("base", device="cpu", compute_type="int8")
         segs, _ = model.transcribe(file_path, language="ko", beam_size=1, vad_filter=True)
         return " ".join(s.text.strip() for s in segs)
 
     raise ValueError(
-        "음성 변환 엔진이 설정되지 않았습니다.\n"
-        "Azure Whisper 배포 이름(AZURE_OPENAI_WHISPER_DEPLOYMENT) 또는 "
-        "OpenAI API 키(OPENAI_API_KEY)를 환경 변수에 설정해주세요."
+        "음성 변환 엔진이 없습니다. GROQ_API_KEY 환경 변수를 설정해주세요.\n"
+        "무료 키 발급: https://console.groq.com"
     )
 
 

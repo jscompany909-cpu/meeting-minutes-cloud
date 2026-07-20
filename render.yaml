@@ -1,27 +1,29 @@
 services:
   - type: web
     name: innotium-meeting-minutes
-    env: python
+    runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 300 --workers 1
     plan: free
     envVars:
       - key: AZURE_OPENAI_ENDPOINT
-        sync: false
+        value: https://inno-ecm-test01.openai.azure.com
       - key: AZURE_OPENAI_KEY
         sync: false
       - key: AZURE_OPENAI_DEPLOYMENT
         value: gpt-4o
       - key: AZURE_OPENAI_API_VERSION
         value: 2025-01-01-preview
-      - key: AZURE_OPENAI_WHISPER_DEPLOYMENT
-        value: ""
-      - key: OPENAI_API_KEY
+      - key: GROQ_API_KEY
         sync: false
+      - key: GROQ_WHISPER_MODEL
+        value: whisper-large-v3-turbo
       - key: REDMINE_URL
-        value: "http://192.168.14.19:3000"
+        value: http://192.168.14.19:3000
       - key: REDMINE_API_KEY
         sync: false
+      # 아래 두 키는 Render 대시보드 > Environment에서 직접 입력하세요
+      # AZURE_OPENAI_KEY, GROQ_API_KEY
       - key: REDMINE_MEETING_PROJECT
         value: weekly_meeting_notes
       - key: REDMINE_TRACKER_UPLOAD
