@@ -422,6 +422,13 @@ def transcribe(file_path: str) -> str:
 
     if engine == "groq":
         from groq import Groq
+        import os as _os
+        file_size = _os.path.getsize(file_path)
+        if file_size > 24 * 1024 * 1024:  # 24MB Groq 제한
+            raise ValueError(
+                f"파일 크기({file_size//1024//1024}MB)가 Groq 제한(24MB)을 초과합니다.\n"
+                "파일을 분할하거나 압축 후 재시도해주세요."
+            )
         gc = Groq(api_key=GROQ_API_KEY)
         with open(file_path, "rb") as f:
             result = gc.audio.transcriptions.create(
@@ -430,7 +437,8 @@ def transcribe(file_path: str) -> str:
                 language="ko",
                 response_format="text",
             )
-        return result if isinstance(result, str) else result.text
+        text = result if isinstance(result, str) else getattr(result, "text", str(result))
+        return text.strip()
 
     elif engine == "openai":
         from openai import OpenAI
@@ -718,8 +726,13 @@ def generate():
                 return __import__("json").dumps({"error": str(e)}, ensure_ascii=False), 500, {"Content-Type": "application/json; charset=utf-8"}
             finally:
                 tmp.unlink(missing_ok=True)
-            if not text or len(text.strip()) < 5:
-                return __import__("json").dumps({"error": "음성 변환 결과가 비어있습니다. 텍스트 탭을 이용해주세요."}), 400, {"Content-Type": "application/json"}
+            if not text or len(text.strip()) < 3:
+                return __import__("json").dumps({
+                    "error": "음성에서 텍스트를 인식하지 못했습니다.\n"
+                             "① 녹음 볼륨이 충분한지 확인해주세요.\n"
+                             "② 지원 형식: m4a · mp3 · wav · mp4 (최대 25MB)\n"
+                             "③ 파일이 25MB 초과 시 분할 후 업로드하세요."
+                }, ensure_ascii=False), 400, {"Content-Type": "application/json; charset=utf-8"}
         else:
             text = request.form.get("text", "").strip()
 
