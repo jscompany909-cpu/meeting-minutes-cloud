@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("meeting-cloud")
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 UPLOAD_TMP = Path(tempfile.gettempdir()) / "meeting_cloud"
@@ -423,22 +423,103 @@ def transcribe(file_path: str) -> str:
     if engine == "groq":
         from groq import Groq
         import os as _os
+
+        # 파일이 24MB 초과 시 자동 압축 (32kbps 모노 MP3)
         file_size = _os.path.getsize(file_path)
-        if file_size > 24 * 1024 * 1024:  # 24MB Groq 제한
-            raise ValueError(
-                f"파일 크기({file_size//1024//1024}MB)가 Groq 제한(24MB)을 초과합니다.\n"
-                "파일을 분할하거나 압축 후 재시도해주세요."
-            )
+        groq_limit = 24 * 1024 * 1024  # 24MB (Groq API 제한)
+        send_path  = file_path
+        tmp_compressed = None
+
+        if file_size > groq_limit:
+            log.info(f"파일 {file_size//1024//1024}MB → 압축 중 (32kbps 모노)...")
+            try:
+                # imageio-ffmpeg: pip 패키지로 ffmpeg 내장 (시스템 설치 불필요)
+                import imageio_ffmpeg
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+
+                import subprocess as _sp
+                tmp_compressed = file_path + "_compressed.mp3"
+                _sp.run([
+                    ffmpeg_exe, "-y", "-i", file_path,
+                    "-ac", "1",          # 모노
+                    "-ar", "16000",      # 16kHz (음성 품질 충분)
+                    "-b:a", "32k",       # 32kbps
+                    "-vn",               # 영상 스트림 제거
+                    tmp_compressed,
+                ], capture_output=True, timeout=120)
+
+                compressed_size = _os.path.getsize(tmp_compressed)
+                log.info(f"압축 완료: {file_size//1024//1024}MB → {compressed_size//1024//1024}MB")
+
+                if compressed_size > groq_limit:
+                    # 그래도 크면 → 15분 단위 청크로 분할 후 순차 전사
+                    log.info("압축 후에도 초과 → 청크 분할 전사")
+                    return _transcribe_chunks(tmp_compressed, compressed_size)
+
+                send_path = tmp_compressed
+                fname = "audio_compressed.mp3"
+            except Exception as e:
+                log.warning(f"압축 실패 ({e}) → 원본 직접 시도")
+                # 압축 실패 시 원본으로 시도 (Groq이 거부할 수 있음)
+
         gc = Groq(api_key=GROQ_API_KEY)
-        with open(file_path, "rb") as f:
-            result = gc.audio.transcriptions.create(
-                file=(fname, f.read()),
-                model=GROQ_WHISPER,
-                language="ko",
-                response_format="text",
-            )
+        try:
+            with open(send_path, "rb") as f:
+                result = gc.audio.transcriptions.create(
+                    file=(fname, f.read()),
+                    model=GROQ_WHISPER,
+                    language="ko",
+                    response_format="text",
+                )
+        finally:
+            if tmp_compressed and _os.path.exists(tmp_compressed):
+                _os.unlink(tmp_compressed)
+
         text = result if isinstance(result, str) else getattr(result, "text", str(result))
         return text.strip()
+
+
+def _transcribe_chunks(audio_path: str, total_size: int) -> str:
+    """큰 파일을 15분씩 나눠 Groq으로 전사 후 합치기"""
+    import imageio_ffmpeg, subprocess as _sp, os as _os, tempfile as _tmp
+
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    chunk_sec   = 15 * 60  # 15분
+    texts       = []
+    chunk_idx   = 0
+
+    while True:
+        start = chunk_idx * chunk_sec
+        chunk_file = audio_path + f"_chunk{chunk_idx}.mp3"
+        ret = _sp.run([
+            ffmpeg_exe, "-y", "-i", audio_path,
+            "-ss", str(start), "-t", str(chunk_sec),
+            "-ac", "1", "-ar", "16000", "-b:a", "32k",
+            chunk_file,
+        ], capture_output=True, timeout=60)
+
+        if not _os.path.exists(chunk_file) or _os.path.getsize(chunk_file) < 1000:
+            if _os.path.exists(chunk_file): _os.unlink(chunk_file)
+            break
+
+        try:
+            with open(chunk_file, "rb") as f:
+                result = groq_client.audio.transcriptions.create(
+                    file=(f"chunk{chunk_idx}.mp3", f.read()),
+                    model=GROQ_WHISPER, language="ko", response_format="text",
+                )
+            chunk_text = result if isinstance(result, str) else getattr(result, "text", str(result))
+            texts.append(chunk_text.strip())
+            log.info(f"청크 {chunk_idx}: {len(chunk_text)}자 전사")
+        except Exception as e:
+            log.warning(f"청크 {chunk_idx} 실패: {e}")
+        finally:
+            if _os.path.exists(chunk_file): _os.unlink(chunk_file)
+
+        chunk_idx += 1
+
+    return " ".join(texts)
 
     elif engine == "openai":
         from openai import OpenAI
