@@ -1,6 +1,5 @@
 flask>=3.0
 flask-cors
-flask-limiter
 openai>=1.0
 groq
 python-docx

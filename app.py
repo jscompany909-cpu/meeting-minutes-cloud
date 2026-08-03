@@ -7,14 +7,13 @@
 - 레드마인 저장은 선택 버튼 (사내망 연결 시만 작동)
 """
 
-import os, json, tempfile, logging
+import os, json, tempfile, logging, time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 import requests as http_req
@@ -33,13 +32,19 @@ CORS(app, resources={r"/*": {"origins": [
     "http://127.0.0.1:5002",
 ]}})
 
-# 레이트 리밋: 고비용 엔드포인트 보호 (API 크레딧 낭비 방지)
-limiter = Limiter(
-    get_remote_address,
-    app=app,
-    default_limits=[],
-    storage_uri="memory://",
-)
+# 레이트 리밋: 외부 패키지 없이 인메모리 슬라이딩 윈도우 구현
+_rate_store: dict = defaultdict(list)
+
+def _check_rate(key: str, max_calls: int, window_sec: int) -> bool:
+    """True 반환 시 허용, False 반환 시 한도 초과."""
+    now = time.time()
+    calls = [t for t in _rate_store[key] if now - t < window_sec]
+    if len(calls) >= max_calls:
+        _rate_store[key] = calls
+        return False
+    calls.append(now)
+    _rate_store[key] = calls
+    return True
 
 UPLOAD_TMP = Path(tempfile.gettempdir()) / "meeting_cloud"
 UPLOAD_TMP.mkdir(exist_ok=True)
@@ -813,8 +818,10 @@ def stt_status():
     ), 200, {"Content-Type": "application/json; charset=utf-8"}
 
 @app.route("/generate", methods=["POST"])
-@limiter.limit("30 per hour")
 def generate():
+    ip = request.remote_addr or "unknown"
+    if not _check_rate(f"gen:{ip}", max_calls=30, window_sec=3600):
+        return __import__("json").dumps({"error": "요청이 너무 많습니다. 1시간에 30회 제한입니다."}), 429, {"Content-Type": "application/json"}
     if request.is_json:
         data = request.get_json(force=True) or {}
         text = data.get("text", "").strip()
@@ -890,8 +897,10 @@ def download():
                      mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 @app.route("/extract-text", methods=["POST"])
-@limiter.limit("60 per hour")
 def extract_text_route():
+    ip = request.remote_addr or "unknown"
+    if not _check_rate(f"ext:{ip}", max_calls=60, window_sec=3600):
+        return __import__("json").dumps({"error": "요청이 너무 많습니다. 1시간에 60회 제한입니다."}), 429, {"Content-Type": "application/json"}
     if "file" not in request.files:
         return __import__("json").dumps({"error": "파일이 없습니다."}), 400, {"Content-Type": "application/json"}
     f = request.files["file"]; suffix = Path(f.filename).suffix.lower()
