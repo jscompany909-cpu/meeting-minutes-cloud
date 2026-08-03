@@ -351,7 +351,9 @@ async function saveRedmine(){
     }else{throw new Error(d.error||'저장 실패');}
   }catch(e){
     const errBox=document.getElementById('rm-err');
-    errBox.textContent='❌ '+e.message+(e.message.includes('fetch')?'\n(사내망 연결 필요)':'');
+    errBox.innerHTML='❌ '+e.message.replace(/\n/g,'<br>')+
+      (e.message.includes('Failed')||e.message.includes('refused')
+        ? '<br>→ <b>meeting_minutes_server.py</b>를 먼저 실행해주세요.' : '');
     errBox.style.display='block';
     btn.textContent='📋 레드마인에 저장하기';
     btn.disabled=false;
@@ -415,84 +417,13 @@ def _stt_engine():
         return None, None
 
 
-# ── 음성 → 텍스트 ─────────────────────────────────────────────────────────────
-def transcribe(file_path: str) -> str:
-    engine, _ = _stt_engine()
-    fname = Path(file_path).name
-
-    if engine == "groq":
-        from groq import Groq
-        import os as _os
-
-        # 파일이 24MB 초과 시 자동 압축 (32kbps 모노 MP3)
-        file_size = _os.path.getsize(file_path)
-        groq_limit = 24 * 1024 * 1024  # 24MB (Groq API 제한)
-        send_path  = file_path
-        tmp_compressed = None
-
-        if file_size > groq_limit:
-            log.info(f"파일 {file_size//1024//1024}MB → 압축 시도 중...")
-            compressed_ok = False
-            tmp_compressed = file_path + "_compressed.mp3"
-
-            # 시스템 ffmpeg로 압축 (apt-get으로 설치됨)
-            try:
-                import subprocess as _sp
-                ret = _sp.run([
-                    "ffmpeg", "-y", "-i", file_path,
-                    "-ac", "1",      # 모노
-                    "-ar", "16000",  # 16kHz
-                    "-b:a", "32k",   # 32kbps
-                    "-vn",           # 영상 제거
-                    tmp_compressed,
-                ], capture_output=True, timeout=180)
-                if ret.returncode == 0 and _os.path.exists(tmp_compressed) and _os.path.getsize(tmp_compressed) > 1000:
-                    compressed_size = _os.path.getsize(tmp_compressed)
-                    log.info(f"ffmpeg 압축 완료: {file_size//1024//1024}MB → {compressed_size//1024//1024}MB")
-                    compressed_ok = True
-                else:
-                    log.warning(f"ffmpeg 압축 실패: returncode={ret.returncode}")
-            except Exception as e1:
-                log.warning(f"ffmpeg 압축 오류: {e1}")
-
-            if compressed_ok:
-                compressed_size = _os.path.getsize(tmp_compressed)
-                if compressed_size > groq_limit:
-                    log.info("압축 후에도 초과 → 청크 분할 전사")
-                    return _transcribe_chunks(tmp_compressed, compressed_size)
-                send_path = tmp_compressed
-                fname = "audio_compressed.mp3"
-            else:
-                # 압축 불가 → 파일 크기 초과 안내
-                mb = file_size // 1024 // 1024
-                raise ValueError(
-                    f"파일({mb}MB)이 너무 큽니다. 서버에서 압축을 시도했으나 실패했습니다.\n"
-                    f"100MB 이하 파일을 업로드하거나, 음성 품질을 낮춰 저장 후 재시도해주세요."
-                )
-
-        gc = Groq(api_key=GROQ_API_KEY)
-        try:
-            with open(send_path, "rb") as f:
-                result = gc.audio.transcriptions.create(
-                    file=(fname, f.read()),
-                    model=GROQ_WHISPER,
-                    language="ko",
-                    response_format="text",
-                )
-        finally:
-            if tmp_compressed and _os.path.exists(tmp_compressed):
-                _os.unlink(tmp_compressed)
-
-        text = result if isinstance(result, str) else getattr(result, "text", str(result))
-        return text.strip()
-
-
+# ── Groq 청크 분할 전사 (헬퍼) ───────────────────────────────────────────────
 def _transcribe_chunks(audio_path: str, total_size: int) -> str:
     """큰 파일을 15분씩 나눠 Groq으로 전사 후 합치기"""
     import subprocess as _sp, os as _os
+    from groq import Groq as _Groq
 
-    ffmpeg_exe = "ffmpeg"
-    groq_client = Groq(api_key=GROQ_API_KEY)
+    groq_client = _Groq(api_key=GROQ_API_KEY)
     chunk_sec   = 15 * 60  # 15분
     texts       = []
     chunk_idx   = 0
@@ -501,7 +432,7 @@ def _transcribe_chunks(audio_path: str, total_size: int) -> str:
         start = chunk_idx * chunk_sec
         chunk_file = audio_path + f"_chunk{chunk_idx}.mp3"
         ret = _sp.run([
-            ffmpeg_exe, "-y", "-i", audio_path,
+            "ffmpeg", "-y", "-i", audio_path,
             "-ss", str(start), "-t", str(chunk_sec),
             "-ac", "1", "-ar", "16000", "-b:a", "32k",
             chunk_file,
@@ -528,6 +459,72 @@ def _transcribe_chunks(audio_path: str, total_size: int) -> str:
         chunk_idx += 1
 
     return " ".join(texts)
+
+
+# ── 음성 → 텍스트 ─────────────────────────────────────────────────────────────
+def transcribe(file_path: str) -> str:
+    engine, _ = _stt_engine()
+    fname = Path(file_path).name
+
+    if engine == "groq":
+        from groq import Groq
+        import os as _os
+
+        file_size  = _os.path.getsize(file_path)
+        groq_limit = 24 * 1024 * 1024  # 24MB (Groq API 제한)
+        send_path  = file_path
+        tmp_compressed = None
+
+        if file_size > groq_limit:
+            log.info(f"파일 {file_size//1024//1024}MB → 압축 시도 중...")
+            compressed_ok  = False
+            tmp_compressed = file_path + "_compressed.mp3"
+
+            try:
+                import subprocess as _sp
+                ret = _sp.run([
+                    "ffmpeg", "-y", "-i", file_path,
+                    "-ac", "1", "-ar", "16000", "-b:a", "32k", "-vn",
+                    tmp_compressed,
+                ], capture_output=True, timeout=180)
+                if ret.returncode == 0 and _os.path.exists(tmp_compressed) and _os.path.getsize(tmp_compressed) > 1000:
+                    compressed_size = _os.path.getsize(tmp_compressed)
+                    log.info(f"ffmpeg 압축 완료: {file_size//1024//1024}MB → {compressed_size//1024//1024}MB")
+                    compressed_ok = True
+                else:
+                    log.warning(f"ffmpeg 압축 실패: returncode={ret.returncode}")
+            except Exception as e1:
+                log.warning(f"ffmpeg 압축 오류: {e1}")
+
+            if compressed_ok:
+                compressed_size = _os.path.getsize(tmp_compressed)
+                if compressed_size > groq_limit:
+                    log.info("압축 후에도 초과 → 청크 분할 전사")
+                    return _transcribe_chunks(tmp_compressed, compressed_size)
+                send_path = tmp_compressed
+                fname = "audio_compressed.mp3"
+            else:
+                mb = file_size // 1024 // 1024
+                raise ValueError(
+                    f"파일({mb}MB)이 너무 큽니다. 서버에서 압축을 시도했으나 실패했습니다.\n"
+                    f"100MB 이하 파일을 업로드하거나, 음성 품질을 낮춰 저장 후 재시도해주세요."
+                )
+
+        gc = Groq(api_key=GROQ_API_KEY)
+        try:
+            with open(send_path, "rb") as f:
+                result = gc.audio.transcriptions.create(
+                    file=(fname, f.read()),
+                    model=GROQ_WHISPER,
+                    language="ko",
+                    response_format="text",
+                )
+        finally:
+            if tmp_compressed and _os.path.exists(tmp_compressed):
+                _os.unlink(tmp_compressed)
+
+        text = result if isinstance(result, str) else getattr(result, "text", str(result))
+        return text.strip()
 
     elif engine == "openai":
         from openai import OpenAI
@@ -564,20 +561,32 @@ def make_minutes(transcript: str, meta_text: str) -> dict:
         model=AZURE_DEPLOY,
         messages=[
             {"role": "system", "content":
-             "당신은 이노티움(주) 전문 회의록 작성자입니다.\n"
-             "원문에 있는 내용만 포함하세요. 추측·없는 내용 추가 금지.\n"
-             "결정사항은 '~하기로 함' 형식. 격식체 사용.\n"
-             "모든 배열 요소는 반드시 문자열(string)이어야 합니다. 객체(object) 사용 금지."},
+             "당신은 이노티움(주)의 전문 회의록 작성자입니다.\n"
+             "회의 녹취·텍스트를 분석해 한국 기업 표준 회의록 형식의 JSON을 작성합니다.\n\n"
+             "작성 원칙:\n"
+             "1. 사실에 근거한 내용만 포함 — 추측·과장 금지\n"
+             "2. 결정사항은 '~하기로 함' 형식으로 명확히 작성\n"
+             "3. Action Item은 담당자·기한이 언급된 경우 반드시 포함\n"
+             "4. 한국 기업 공식 문체 사용 (격식체, 존댓말 배제)\n"
+             "5. 안건·논의 주제는 최대한 세분화하여 빠짐없이 정리\n"
+             "6. overview는 회의에서 다룬 전체 안건 목록으로 구성\n"
+             "7. 모든 배열 요소는 반드시 문자열(string) — 객체(object) 사용 금지"},
             {"role": "user", "content":
-             f"[회의 정보]\n{meta_text}\n\n[회의 내용]\n{transcript}\n\n"
-             "아래 JSON 스키마를 엄격히 따르세요. 모든 값은 문자열(string)입니다:\n"
-             '{"title": "문자열", "overview": ["문자열1", "문자열2"], '
-             '"discussion": [{"main": "문자열", "sub": ["문자열1", "문자열2"]}], '
-             '"decisions": ["문자열1 (~하기로 함)"], "others": ["문자열"]}'},
+             f"[회의 정보]\n{meta_text}\n\n[회의 내용/녹취]\n{transcript}\n\n"
+             "아래 JSON 스키마를 엄격히 따르세요 (설명 없이 JSON만 출력):\n"
+             '{\n'
+             '  "title": "회의 제목 (핵심 주제 기반, 20자 이내)",\n'
+             '  "overview": ["안건 1", "안건 2"],\n'
+             '  "discussion": [\n'
+             '    {"main": "논의 주제", "sub": ["세부 내용 1", "세부 내용 2"]}\n'
+             '  ],\n'
+             '  "decisions": ["결정사항 1 (~하기로 함)"],\n'
+             '  "others": ["기타 사항 또는 다음 회의 예정 등"]\n'
+             '}'},
         ],
         response_format={"type": "json_object"},
         temperature=0.2,
-        max_tokens=2000,
+        max_tokens=4000,
     )
     raw = __import__("json").loads(resp.choices[0].message.content)
     # 혹시 dict가 섞여 들어온 경우 문자열로 변환
