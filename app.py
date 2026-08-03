@@ -804,7 +804,7 @@ def index():
 def health():
     engine, label = _stt_engine()
     return __import__("json").dumps(
-        {"ok": True, "server": "meeting-minutes-cloud", "version": "3.2",
+        {"ok": True, "server": "meeting-minutes-cloud", "version": "3.3",
          "stt": label or "unavailable", "gpt4o": bool(AZURE_KEY)},
         ensure_ascii=False
     ), 200, {"Content-Type": "application/json; charset=utf-8"}
