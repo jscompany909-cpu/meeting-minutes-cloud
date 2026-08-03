@@ -13,6 +13,8 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 import requests as http_req
@@ -23,7 +25,21 @@ log = logging.getLogger("meeting-cloud")
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB
-CORS(app, resources={r"/*": {"origins": "*"}})
+
+# CORS: GitHub Pages + 로컬 개발 환경만 허용 (와일드카드 제거)
+CORS(app, resources={r"/*": {"origins": [
+    "https://jscompany909-cpu.github.io",
+    "http://localhost:5002",
+    "http://127.0.0.1:5002",
+]}})
+
+# 레이트 리밋: 고비용 엔드포인트 보호 (API 크레딧 낭비 방지)
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
 
 UPLOAD_TMP = Path(tempfile.gettempdir()) / "meeting_cloud"
 UPLOAD_TMP.mkdir(exist_ok=True)
@@ -797,6 +813,7 @@ def stt_status():
     ), 200, {"Content-Type": "application/json; charset=utf-8"}
 
 @app.route("/generate", methods=["POST"])
+@limiter.limit("30 per hour")
 def generate():
     if request.is_json:
         data = request.get_json(force=True) or {}
@@ -816,7 +833,9 @@ def generate():
             suffix = Path(audio.filename).suffix.lower()
             if suffix not in ALLOWED_AUDIO:
                 return __import__("json").dumps({"error": f"지원하지 않는 형식: {suffix}"}), 400, {"Content-Type": "application/json"}
-            tmp = UPLOAD_TMP / f"rec_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
+            fd, tmp_str = tempfile.mkstemp(suffix=suffix, dir=str(UPLOAD_TMP))
+            os.close(fd)
+            tmp = Path(tmp_str)
             audio.save(str(tmp))
             try:
                 text = transcribe(str(tmp))
@@ -828,8 +847,8 @@ def generate():
                 return __import__("json").dumps({
                     "error": "음성에서 텍스트를 인식하지 못했습니다.\n"
                              "① 녹음 볼륨이 충분한지 확인해주세요.\n"
-                             "② 지원 형식: m4a · mp3 · wav · mp4 (최대 25MB)\n"
-                             "③ 파일이 25MB 초과 시 분할 후 업로드하세요."
+                             "② 지원 형식: m4a · mp3 · wav · mp4 · webm · ogg · flac (최대 200MB)\n"
+                             "③ 파일이 200MB 초과 시 분할 후 업로드하세요."
                 }, ensure_ascii=False), 400, {"Content-Type": "application/json; charset=utf-8"}
         else:
             text = request.form.get("text", "").strip()
@@ -859,7 +878,9 @@ def generate():
 @app.route("/download", methods=["POST"])
 def download():
     data = request.get_json()
-    m = data.get("minutes", {}); filename = data.get("filename", "회의록.docx")
+    m = data.get("minutes", {})
+    # Path Traversal 방지: 디렉토리 구분자 제거, 파일명만 추출
+    filename = Path(data.get("filename", "회의록.docx")).name or "회의록.docx"
     out = UPLOAD_TMP / filename
     try:
         build_docx(m, data.get("date",""), data.get("place",""), data.get("attendees",""), data.get("author",""), str(out))
@@ -869,13 +890,16 @@ def download():
                      mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 @app.route("/extract-text", methods=["POST"])
+@limiter.limit("60 per hour")
 def extract_text_route():
     if "file" not in request.files:
         return __import__("json").dumps({"error": "파일이 없습니다."}), 400, {"Content-Type": "application/json"}
     f = request.files["file"]; suffix = Path(f.filename).suffix.lower()
     if suffix not in ALLOWED_DOCS:
         return __import__("json").dumps({"error": f"지원하지 않는 형식: {suffix}"}), 400, {"Content-Type": "application/json"}
-    tmp = UPLOAD_TMP / f"doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
+    fd, tmp_str = tempfile.mkstemp(suffix=suffix, dir=str(UPLOAD_TMP))
+    os.close(fd)
+    tmp = Path(tmp_str)
     f.save(str(tmp))
     try:
         text = extract_text_from_file(str(tmp), suffix).strip()
