@@ -873,7 +873,13 @@ def generate():
         return __import__("json").dumps({"error": f"회의록 생성 실패: {e}"}, ensure_ascii=False), 500, {"Content-Type": "application/json; charset=utf-8"}
 
     preview = build_preview(minutes, date_str, place, attendees, author)
-    filename = f"[회의록] {minutes.get('title', datetime.now().strftime('%Y%m%d'))}.docx"
+    try:
+        date_part = datetime.strptime(date_str[:10], '%Y-%m-%d').strftime('%y%m%d') if date_str else datetime.now().strftime('%y%m%d')
+    except Exception:
+        date_part = datetime.now().strftime('%y%m%d')
+    raw_title = minutes.get('title', '회의록')
+    safe_title = "".join(c for c in raw_title if c not in r'\/:*?"<>|')[:30].strip()
+    filename = f"회의록_{date_part}_({safe_title}).docx"
 
     resp_data = __import__("json").dumps({
         "minutes": minutes, "preview": preview,
